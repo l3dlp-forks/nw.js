@@ -5,6 +5,8 @@
 
 ## Basic Requirements
 
+The transparent feature is supposed to work with frameless window.
+
 ### Windows
 
 The transparent feature is only supported on Vista and above with DWM (Desktop Window Manager) enabled. Transparency might not work on classic theme / basic version of the OS, or using remote desktop.
@@ -23,9 +25,10 @@ In the HTML body, specify the alpha of the background colour:
 <body style="background-color:rgba(0,0,0,0);">
 ```
 
-and specify [`transparent` field](../../References/Manifest Format.md#transparent) to `ture` in manifest:
+and specify [`transparent` field](../../References/Manifest Format.md#transparent) to `true` in manifest:
 ```json
   "window": {
+    "frame": false,
     "transparent": true
   }
 ```

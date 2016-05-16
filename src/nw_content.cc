@@ -2,10 +2,12 @@
 
 #include "nw_content.h"
 #include "nw_base.h"
+#include "base/files/file_enumerator.h"
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
 #include "base/path_service.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
@@ -13,21 +15,26 @@
 #include "base/threading/thread_restrictions.h"
 
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/devtools/devtools_window.h"
 #include "chrome/browser/io_thread.h"
 #include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/common/chrome_paths.h"
 
 #include "components/crx_file/id_util.h"
+#include "components/content_settings/core/browser/content_settings_utils.h"
 
 #include "content/browser/dom_storage/dom_storage_area.h"
 #include "content/common/dom_storage/dom_storage_map.h"
 #include "content/nw/src/common/shell_switches.h"
+#include "content/public/browser/browser_thread.h"
+#include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/notification_service.h"
 #include "content/public/browser/notification_types.h"
 #include "content/public/browser/plugin_service.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/child/v8_value_converter.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/result_codes.h"
 #include "content/public/common/user_agent.h"
@@ -38,20 +45,26 @@
 #include "content/nw/src/api/object_manager.h"
 #include "content/nw/src/policy_cert_verifier.h"
 
+#include "extensions/browser/guest_view/web_view/web_view_renderer_state.h"
+#include "extensions/browser/guest_view/web_view/web_view_guest.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/renderer/dispatcher.h"
+#include "extensions/renderer/renderer_extension_registry.h"
 #include "extensions/renderer/script_context.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/feature_switch.h"
 #include "extensions/common/features/feature.h"
 #include "extensions/common/manifest.h"
 #include "extensions/common/manifest_constants.h"
+#include "extensions/common/manifest_handlers/webview_info.h"
 
 #include "extensions/grit/extensions_renderer_resources.h"
 
 #include "net/cert/x509_certificate.h"
+
+#include "storage/common/database/database_identifier.h"
 
 #include "third_party/WebKit/public/web/WebDocument.h"
 #include "third_party/WebKit/public/web/WebFrame.h"
@@ -82,13 +95,13 @@
 
 #undef LOG
 #undef ASSERT
-#undef FROM_HERE
+//#undef FROM_HERE
 
 #if defined(OS_WIN)
 #define _USE_MATH_DEFINES
 #include <math.h>
 #endif
-#include "third_party/WebKit/Source/config.h"
+//#include "third_party/WebKit/Source/config.h"
 #include "third_party/WebKit/Source/core/frame/Frame.h"
 #include "third_party/WebKit/Source/web/WebLocalFrameImpl.h"
 #include "V8HTMLElement.h"
@@ -98,6 +111,10 @@
 
 using content::RenderView;
 using content::RenderViewImpl;
+using content::DevToolsAgentHost;
+using content::RenderFrameHost;
+using content::RenderProcessHost;
+using content::WebContents;
 using extensions::ScriptContext;
 using extensions::Extension;
 using extensions::EventRouter;
@@ -105,9 +122,12 @@ using extensions::Manifest;
 using extensions::Feature;
 using extensions::ExtensionPrefs;
 using extensions::ExtensionRegistry;
+using extensions::RendererExtensionRegistry;
 using extensions::Dispatcher;
 using extensions::ContentVerifierDelegate;
 using extensions::NWContentVerifierDelegate;
+using extensions::WebviewInfo;
+using extensions::WebViewGuest;
 using blink::WebScriptSource;
 
 namespace manifest_keys = extensions::manifest_keys;
@@ -131,6 +151,10 @@ namespace {
 
 extensions::Dispatcher* g_dispatcher = NULL;
 bool g_reloading_app = false;
+bool g_pinning_renderer = true;
+int g_cdt_process_id = -1;
+std::string g_extension_id;
+bool g_skip_render_widget_hidden = false;
 
 static inline v8::Local<v8::String> v8_str(const char* x) {
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
@@ -194,6 +218,47 @@ bool GetPackageImage(nw::Package* package,
   return true;
 }
 
+void SetTrustAnchors(IOThread* io_thread, const net::CertificateList& trust_anchors) {
+  PolicyCertVerifier* verifier =
+    (PolicyCertVerifier*)io_thread->globals()->cert_verifier.get();
+  verifier->SetTrustAnchors(trust_anchors);
+}
+
+void MainPartsPreMainMessageLoopRunHook() {
+  nw::Package* package = nw::package();
+  const base::ListValue *additional_trust_anchors = NULL;
+  if (package->root()->GetList("additional_trust_anchors", &additional_trust_anchors)) {
+    net::CertificateList trust_anchors;
+    for (size_t i = 0; i<additional_trust_anchors->GetSize(); i++) {
+      std::string certificate_string;
+      if (!additional_trust_anchors->GetString(i, &certificate_string)) {
+        // LOG(WARNING)
+        //   << "Could not get string from entry " << i;
+        continue;
+      }
+
+      net::CertificateList loaded =
+        net::X509Certificate::CreateCertificateListFromBytes(
+        certificate_string.c_str(), certificate_string.size(),
+        net::X509Certificate::FORMAT_AUTO);
+      if (loaded.empty() && !certificate_string.empty()) {
+        // LOG(WARNING)
+        //   << "Could not load certificate from entry " << i;
+        continue;
+      }
+
+      trust_anchors.insert(trust_anchors.end(), loaded.begin(), loaded.end());
+    }
+    if (!trust_anchors.empty()) {
+      // LOG(INFO)
+      //   << "Added " << trust_anchors.size() << " certificates to trust anchors.";
+      content::BrowserThread::PostTask(
+        content::BrowserThread::IO,
+        FROM_HERE,
+        base::Bind(SetTrustAnchors, g_browser_process->io_thread(), trust_anchors));
+    }
+  }
+}
 
 int MainPartsPreCreateThreadsHook() {
   base::ThreadRestrictions::ScopedAllowIO allow_io;
@@ -212,10 +277,11 @@ int MainPartsPreCreateThreadsHook() {
     std::string name;
     package->root()->GetString("name", &name);
     if (!name.empty() && PathService::Get(chrome::DIR_USER_DATA, &user_data_dir)) {
-      base::FilePath old_dom_storage = user_data_dir
-        .Append(FILE_PATH_LITERAL("Local Storage"))
-        .Append(FILE_PATH_LITERAL("file__0.localstorage"));
-      if (base::PathExists(old_dom_storage)) {
+      base::FilePath old_dom_storage_dir = user_data_dir
+        .Append(FILE_PATH_LITERAL("Local Storage"));
+      base::FileEnumerator enum0(old_dom_storage_dir, false, base::FileEnumerator::FILES, FILE_PATH_LITERAL("*_0.localstorage"));
+      base::FilePath old_dom_storage = enum0.Next();
+      if (!old_dom_storage.empty()) {
         std::string id = crx_file::id_util::GenerateId(name);
         GURL origin("chrome-extension://" + id + "/");
         base::FilePath new_storage_dir = user_data_dir.Append(FILE_PATH_LITERAL("Default"))
@@ -230,39 +296,23 @@ int MainPartsPreCreateThreadsHook() {
         base::Move(old_dom_storage, new_dom_storage);
         LOG_IF(INFO, true) << "Migrate DOM storage from " << old_dom_storage.AsUTF8Unsafe() << " to " << new_dom_storage.AsUTF8Unsafe();
       }
-    }
-
-    const base::ListValue *additional_trust_anchors = NULL;
-    if (package->root()->GetList("additional_trust_anchors", &additional_trust_anchors)) {
-      net::CertificateList trust_anchors;
-      for (size_t i=0; i<additional_trust_anchors->GetSize(); i++) {
-        std::string certificate_string;
-        if (!additional_trust_anchors->GetString(i, &certificate_string)) {
-          // LOG(WARNING)
-          //   << "Could not get string from entry " << i;
-          continue;
-        }
-
-        net::CertificateList loaded =
-          net::X509Certificate::CreateCertificateListFromBytes(
-              certificate_string.c_str(), certificate_string.size(),
-              net::X509Certificate::FORMAT_AUTO);
-        if (loaded.empty() && !certificate_string.empty()) {
-          // LOG(WARNING)
-          //   << "Could not load certificate from entry " << i;
-          continue;
-        }
-
-        trust_anchors.insert(trust_anchors.end(), loaded.begin(), loaded.end());
-      }
-      if (!trust_anchors.empty()) {
-        // LOG(INFO)
-        //   << "Added " << trust_anchors.size() << " certificates to trust anchors.";
-        PolicyCertVerifier* verifier =
-          (PolicyCertVerifier*)g_browser_process->io_thread()->globals()->cert_verifier.get();
-        verifier->SetTrustAnchors(trust_anchors);
+      base::FilePath old_indexeddb = user_data_dir
+        .Append(FILE_PATH_LITERAL("IndexedDB"))
+        .Append(FILE_PATH_LITERAL("file__0.indexeddb.leveldb"));
+      if (base::PathExists(old_indexeddb)) {
+        std::string id = crx_file::id_util::GenerateId(name);
+        GURL origin("chrome-extension://" + id + "/");
+        base::FilePath new_indexeddb_dir = user_data_dir.Append(FILE_PATH_LITERAL("Default"))
+          .Append(FILE_PATH_LITERAL("IndexedDB"))
+          .AppendASCII(storage::GetIdentifierFromOrigin(origin))
+          .AddExtension(FILE_PATH_LITERAL(".indexeddb.leveldb"));
+        base::CreateDirectory(new_indexeddb_dir.DirName());
+        base::CopyDirectory(old_indexeddb, new_indexeddb_dir.DirName(), true);
+        base::Move(new_indexeddb_dir.DirName().Append(FILE_PATH_LITERAL("file__0.indexeddb.leveldb")), new_indexeddb_dir);
+        LOG_IF(INFO, true) << "Migrated IndexedDB from " << old_indexeddb.AsUTF8Unsafe() << " to " << new_indexeddb_dir.AsUTF8Unsafe();
       }
     }
+
   }
   return content::RESULT_CODE_NORMAL_EXIT;
 }
@@ -278,11 +328,18 @@ void DocumentFinishHook(blink::WebFrame* frame,
   v8::HandleScope hscope(isolate);
   std::string path = effective_document_url.path();
   v8::Local<v8::Context> v8_context = frame->mainWorldScriptContext();
-  std::string root_path = extension->path().AsUTF8Unsafe();
-  base::FilePath root(extension->path());
   RenderViewImpl* rv = RenderViewImpl::FromWebView(frame->view());
   if (!rv)
     return;
+  if (!extension) {
+    extension = RendererExtensionRegistry::Get()->GetByID(g_extension_id);
+    if (!extension)
+      return;
+  }
+  if (!(extension->is_extension() || extension->is_platform_app()))
+    return;
+  std::string root_path = extension->path().AsUTF8Unsafe();
+  base::FilePath root(extension->path());
   std::string js_fn = rv->renderer_preferences().nw_inject_js_doc_end;
   if (js_fn.empty())
     return;
@@ -403,6 +460,9 @@ void DocumentElementHook(blink::WebLocalFrame* frame,
 void ContextCreationHook(blink::WebLocalFrame* frame, ScriptContext* context) {
   v8::Isolate* isolate = context->isolate();
 
+  if (g_extension_id.empty())
+    g_extension_id = context->extension()->id();
+
   bool nodejs_enabled = true;
   context->extension()->manifest()->GetBoolean(manifest_keys::kNWJSEnableNode, &nodejs_enabled);
 
@@ -425,7 +485,7 @@ void ContextCreationHook(blink::WebLocalFrame* frame, ScriptContext* context) {
       argv[1] = argv[2] = nullptr;
       std::string main_fn;
 
-      if (context->extension()->manifest()->GetString(manifest_keys::kNWJSInternalMainFilename, &main_fn)) {
+      if (context->extension()->manifest()->GetString("node-main", &main_fn)) {
         argc = 2;
         argv[1] = strdup(main_fn.c_str());
       }
@@ -484,37 +544,36 @@ void ContextCreationHook(blink::WebLocalFrame* frame, ScriptContext* context) {
   }
 
   v8::Local<v8::Context> node_context2;
-  g_get_node_context_fn(&node_context2);
-  if (!mixed_context) {
-    v8::Local<v8::Context> g_context =
-      v8::Local<v8::Context>::New(isolate, node_context2);
-    v8::Local<v8::Object> node_global = g_context->Global();
+  if (mixed_context)
+    node_context2 = context->v8_context();
+  else
+    g_get_node_context_fn(&node_context2);
+  v8::Local<v8::Context> g_context =
+    v8::Local<v8::Context>::New(isolate, node_context2);
+  v8::Local<v8::Object> node_global = g_context->Global();
 
+  if (!mixed_context) {
     context->v8_context()->SetAlignedPointerInEmbedderData(NODE_CONTEXT_EMBEDDER_DATA_INDEX, g_get_node_env_fn());
     context->v8_context()->SetSecurityToken(g_context->GetSecurityToken());
-
-    v8::Handle<v8::Object> nw = AsObjectOrEmpty(CreateNW(context, node_global, g_context));
-#if 1
-    v8::Local<v8::Array> symbols = v8::Array::New(isolate, 5);
-    symbols->Set(0, v8::String::NewFromUtf8(isolate, "global"));
-    symbols->Set(1, v8::String::NewFromUtf8(isolate, "process"));
-    symbols->Set(2, v8::String::NewFromUtf8(isolate, "Buffer"));
-    symbols->Set(3, v8::String::NewFromUtf8(isolate, "root"));
-    symbols->Set(4, v8::String::NewFromUtf8(isolate, "require"));
-
-    g_context->Enter();
-    for (unsigned i = 0; i < symbols->Length(); ++i) {
-      v8::Local<v8::Value> key = symbols->Get(i);
-      v8::Local<v8::Value> val = node_global->Get(key);
-      nw->Set(key, val);
-    }
-    g_context->Exit();
-#endif
   }
+  v8::Handle<v8::Object> nw = AsObjectOrEmpty(CreateNW(context, node_global, g_context));
+
+  v8::Local<v8::Array> symbols = v8::Array::New(isolate, 5);
+  symbols->Set(0, v8::String::NewFromUtf8(isolate, "global"));
+  symbols->Set(1, v8::String::NewFromUtf8(isolate, "process"));
+  symbols->Set(2, v8::String::NewFromUtf8(isolate, "Buffer"));
+  symbols->Set(3, v8::String::NewFromUtf8(isolate, "root"));
+  symbols->Set(4, v8::String::NewFromUtf8(isolate, "require"));
+
+  g_context->Enter();
+  for (unsigned i = 0; i < symbols->Length(); ++i) {
+    v8::Local<v8::Value> key = symbols->Get(i);
+    v8::Local<v8::Value> val = node_global->Get(key);
+    nw->Set(key, val);
+  }
+  g_context->Exit();
 
   std::string set_nw_script = "'use strict';";
-  if (mixed_context)
-    set_nw_script += "var nw = global;";
   {
     blink::WebScopedMicrotaskSuppression suppression;
     v8::Context::Scope cscope(context->v8_context());
@@ -721,6 +780,7 @@ void willHandleNavigationPolicy(content::RenderView* rv,
   v8::Context::Scope cscope (v8_context);
   v8::Handle<v8::Value> element = v8::Null(isolate);
   v8::Handle<v8::Object> policy_obj = v8::Object::New(isolate);
+
 #if 0
   blink::LocalFrame* core_frame = blink::toWebLocalFrameImpl(frame)->frame();
   if (core_frame->deprecatedLocalOwner()) {
@@ -757,13 +817,13 @@ void willHandleNavigationPolicy(content::RenderView* rv,
                                                         "onNavigation", &arguments);
     }
   }
-  v8::Local<v8::Value> manifest_val = policy_obj->Get(v8_str("manifest"));
 
-  //TODO: change this to object
-  if (manifest_val->IsString()) {
-    v8::String::Utf8Value manifest_str(manifest_val);
-    if (manifest)
-      *manifest = blink::WebString::fromUTF8(*manifest_str);
+  scoped_ptr<content::V8ValueConverter> converter(content::V8ValueConverter::create());
+  v8::Local<v8::Value> manifest_v8 = policy_obj->Get(v8_str("manifest"));
+  scoped_ptr<base::Value> manifest_val(converter->FromV8Value(manifest_v8, v8_context));
+  std::string manifest_str;
+  if (manifest_val.get() && base::JSONWriter::Write(*manifest_val, &manifest_str)) {
+    *manifest = blink::WebString::fromUTF8(manifest_str.c_str());
   }
 
   v8::Local<v8::Value> val = policy_obj->Get(v8_str("val"));
@@ -784,6 +844,10 @@ void willHandleNavigationPolicy(content::RenderView* rv,
 
 void ExtensionDispatcherCreated(extensions::Dispatcher* dispatcher) {
   g_dispatcher = dispatcher;
+  const base::CommandLine& command_line =
+      *base::CommandLine::ForCurrentProcess();
+  if (command_line.HasSwitch(switches::kDisableRAFThrottling))
+    g_skip_render_widget_hidden = true;
 }
 
 void CalcNewWinParams(content::WebContents* new_contents, void* params,
@@ -791,13 +855,7 @@ void CalcNewWinParams(content::WebContents* new_contents, void* params,
                       std::string* nw_inject_js_doc_end) {
   extensions::AppWindow::CreateParams ret;
   scoped_ptr<base::Value> val;
-  scoped_ptr<base::DictionaryValue> manifest;
-  std::string manifest_str = base::UTF16ToUTF8(nw::GetCurrentNewWinManifest());
-  val = base::JSONReader().ReadToValue(manifest_str);
-  if (val.get() && val->IsType(base::Value::TYPE_DICTIONARY))
-    manifest.reset(static_cast<base::DictionaryValue*>(val.release()));
-  else
-    manifest.reset(new base::DictionaryValue());
+  scoped_ptr<base::DictionaryValue> manifest = MergeManifest();
 
   bool resizable;
   if (manifest->GetBoolean(switches::kmResizable, &resizable)) {
@@ -876,6 +934,47 @@ bool GetImage(Package* package, const FilePath& icon_path, gfx::Image* image) {
   return true;
 }
 
+scoped_ptr<base::DictionaryValue> MergeManifest() {
+  // Following attributes will not be inherited from package.json 
+  // Keep this list consistent with documents in `Manifest Format.md`
+  static std::vector<const char*> non_inherited_attrs = {
+                                                    switches::kmFullscreen,
+                                                    switches::kmKiosk,
+                                                    switches::kmPosition,
+                                                    switches::kmResizable,
+                                                    switches::kmShow
+                                                    };
+  scoped_ptr<base::DictionaryValue> manifest;
+
+  // retrieve `window` manifest set by `new-win-policy`
+  std::string manifest_str = base::UTF16ToUTF8(nw::GetCurrentNewWinManifest());
+  scoped_ptr<base::Value> val = base::JSONReader().ReadToValue(manifest_str);
+  if (val && val->IsType(base::Value::Type::TYPE_DICTIONARY)) {
+    manifest.reset(static_cast<base::DictionaryValue*>(val.release()));
+  } else {
+    manifest.reset(new base::DictionaryValue());
+  }
+
+  // merge with default `window` manifest in package.json if exists
+  nw::Package* pkg = nw::package();
+  if (pkg) {
+    base::DictionaryValue* manifest_window = pkg->window();
+    if (manifest_window) {
+      scoped_ptr<base::DictionaryValue> manifest_window_cloned = manifest_window->DeepCopyWithoutEmptyChildren();
+      // filter out non inherited attributes
+      std::vector<const char*>::iterator it;
+      for(it = non_inherited_attrs.begin(); it != non_inherited_attrs.end(); it++) {
+        manifest_window_cloned->RemoveWithoutPathExpansion(*it, NULL);
+      }
+      // overwrite default `window` manifest with the one passed by `new-win-policy`
+      manifest_window_cloned->MergeDictionary(manifest.get());
+      return manifest_window_cloned;
+    }
+  }
+
+  return manifest;
+}
+
 bool ExecuteAppCommandHook(int command_id, extensions::AppWindow* app_window) {
 #if defined(OS_MACOSX)
   return false;
@@ -903,10 +1002,10 @@ void SendEventToApp(const std::string& event_name, scoped_ptr<base::ListValue> e
         extension->location() == extensions::Manifest::COMMAND_LINE) {
       scoped_ptr<extensions::Event> event(new extensions::Event(extensions::events::UNKNOWN,
                                                                 event_name,
-                                                                event_args.Pass()));
+                                                                std::move(event_args)));
       event->restrict_to_browser_context = profile;
       EventRouter::Get(profile)
-        ->DispatchEventToExtension(extension->id(), event.Pass());
+        ->DispatchEventToExtension(extension->id(), std::move(event));
     }
   }
 }
@@ -924,7 +1023,7 @@ bool ProcessSingletonNotificationCallbackHook(const base::CommandLine& command_l
 #endif
     scoped_ptr<base::ListValue> arguments(new base::ListValue());
     arguments->AppendString(cmd);
-    SendEventToApp("nw.App.onOpen", arguments.Pass());
+    SendEventToApp("nw.App.onOpen", std::move(arguments));
   }
     
   return single_instance;
@@ -933,8 +1032,15 @@ bool ProcessSingletonNotificationCallbackHook(const base::CommandLine& command_l
 #if defined(OS_MACOSX)
 bool ApplicationShouldHandleReopenHook(bool hasVisibleWindows) {
   scoped_ptr<base::ListValue> arguments(new base::ListValue());
-  SendEventToApp("nw.App.onReopen",arguments.Pass());
+  SendEventToApp("nw.App.onReopen",std::move(arguments));
   return true;
+}
+
+void OSXOpenURLsHook(const std::vector<GURL>& startup_urls) {
+  scoped_ptr<base::ListValue> arguments(new base::ListValue());
+  for (size_t i = 0; i < startup_urls.size(); i++)
+    arguments->AppendString(startup_urls[i].spec());
+  SendEventToApp("nw.App.onOpen", std::move(arguments));
 }
 #endif
 
@@ -1005,6 +1111,83 @@ void OverrideWebkitPrefsHook(content::RenderViewHost* rvh, content::WebPreferenc
 
   content::PluginService* plugin_service = content::PluginService::GetInstance();
   plugin_service->AddExtraPluginDir(plugins_dir);
+}
+
+bool CheckStoragePartitionMatches(int render_process_id, const GURL& url) {
+  return render_process_id == g_cdt_process_id && url.SchemeIs(content_settings::kChromeDevToolsScheme);
+}
+
+bool RphGuestFilterURLHook(RenderProcessHost* rph, const GURL* url)  {
+  extensions::WebViewRendererState* renderer_state =
+      extensions::WebViewRendererState::GetInstance();
+  std::string owner_extension;
+  int process_id = rph->GetID();
+  if (!renderer_state->GetOwnerInfo(process_id, nullptr, &owner_extension))
+    return false;
+  const Extension* extension =
+    ExtensionRegistry::Get(rph->GetBrowserContext())->enabled_extensions().GetByID(owner_extension);
+  if (!extension)
+    return false;
+  bool file_scheme = false;
+  if (WebviewInfo::IsURLWebviewAccessible(extension,
+                                          WebViewGuest::GetPartitionID(rph),
+                                          *url, &file_scheme)) {
+    if (file_scheme) {
+      content::ChildProcessSecurityPolicy::GetInstance()->GrantScheme(
+          process_id, url::kFileScheme);
+    }
+    return true;
+  }
+  return false;
+}
+
+bool ShouldServiceRequestHook(int child_id, const GURL& url) {
+  RenderProcessHost* rph = RenderProcessHost::FromID(child_id);
+  if (!rph)
+    return false;
+  return RphGuestFilterURLHook(rph, &url);
+}
+
+void ShowDevtools(bool show, content::WebContents* web_contents, content::WebContents* container) {
+  content::RenderFrameHost* rfh = web_contents->GetMainFrame();
+  if (container) {
+    scoped_refptr<DevToolsAgentHost> agent_host(DevToolsAgentHost::GetOrCreateFor(rfh));
+    g_cdt_process_id = container->GetRenderProcessHost()->GetID();
+    content::ChildProcessSecurityPolicy::GetInstance()->GrantAll(g_cdt_process_id);
+    
+    DevToolsWindow* window = DevToolsWindow::FindDevToolsWindow(agent_host.get());
+    if (!window) {
+      Profile* profile = Profile::FromBrowserContext(
+             web_contents->GetBrowserContext());
+      window = DevToolsWindow::Create(profile, GURL(), nullptr, false, std::string(), false, std::string(), container);
+      if (!window)
+        return;
+      window->bindings_->AttachTo(agent_host);
+    }
+    return;
+  }
+
+  if (show) {
+    DevToolsWindow::InspectElement(rfh, 0, 0);
+    return;
+  }
+  scoped_refptr<DevToolsAgentHost> agent(
+      DevToolsAgentHost::GetOrCreateFor(rfh));
+  DevToolsWindow* window = DevToolsWindow::FindDevToolsWindow(agent.get());
+  if (window)
+    window->InspectedContentsClosing();
+}
+
+bool PinningRenderer() {
+  return g_pinning_renderer;
+}
+
+void SetPinningRenderer(bool pin) {
+  g_pinning_renderer = pin;
+}
+
+bool RenderWidgetWasHiddenHook(content::RenderWidget* rw) {
+  return g_skip_render_widget_hidden;
 }
 
 } //namespace nw

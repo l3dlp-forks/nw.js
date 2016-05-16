@@ -106,16 +106,6 @@ if platform_name == 'win':
 if platform_name == 'win':
     arch = 'ia32'
 
-if platform_name != 'osx':
-    try:
-        os.remove(os.path.join(binaries_location, 'en-US.pak'))
-    except OSError:
-        pass
-    shutil.copy(os.path.join(binaries_location, 'locales', 'en-US.pak'), binaries_location)
-    shutil.rmtree(os.path.join(binaries_location, 'locales'))
-    os.mkdir(os.path.join(binaries_location, 'locales'))
-    shutil.copy(os.path.join(binaries_location, 'en-US.pak'), os.path.join(binaries_location, 'locales'))
-
 if platform_name == 'osx':
     # detect output arch
     nw_bin = binaries_location + '/nwjs.app/Contents/MacOS/nwjs'
@@ -170,6 +160,7 @@ def generate_target_nw(platform_name, arch, version):
                            'natives_blob.bin',
                            'lib/libnw.so',
                            'lib/libnode.so',
+                           'lib/libffmpeg.so',
                            ]
         if flavor == 'sdk':
             target['input'].append('nwjc')
@@ -199,7 +190,10 @@ def generate_target_nw(platform_name, arch, version):
                            'resources.pak',
                            'nw_100_percent.pak',
                            'nw_200_percent.pak',
-                           'dbghelp.dll'
+                           'dbghelp.dll',
+                           'ffmpeg.dll',
+                            # To be removed in CR51
+                           'libexif.dll',
                            ]
         if flavor == 'sdk':
             target['input'].append('nwjc.exe')

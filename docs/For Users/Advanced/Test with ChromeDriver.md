@@ -15,7 +15,7 @@ The following workflow uses [selenium-python](http://selenium-python.readthedocs
 
 ### Installing
 
-* Download ChromeDriver from NW.js website
+* Download ChromeDriver from NW.js website. It's in the SDK build.
 * Extract the package and place `chromedriver` under the same dir that contains the NW.js binaries: `nw` for Linux, `nw.exe` for Windows, or `node-webkit.app` for Mac.
 * Install `selenium-python` in your project:
 ```bash
@@ -55,14 +55,14 @@ See http://selenium-python.readthedocs.org/ for detailed documents of `selenium-
 
 * chromedriver is modified to find NW executable in the same directory by default
 
-* An additional method `add_nw_argument` is added if you want to pass non-switch argument to the command line:
+* An additional option `nwargs` is added if you want to pass non-switch argument to the command line:
 ```python
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 chrome_options = Options()
 chrome_options.add_argument("nwapp=/path/to/your/app")
-chrome_options.add_nw_argument("foo")
+chrome_options.add_experimental_option("nwargs", ["arg1", "arg2"])
 
 driver = webdriver.Chrome(executable_path='/path/to/nwjs/chromedriver', chrome_options=chrome_options)
 ```

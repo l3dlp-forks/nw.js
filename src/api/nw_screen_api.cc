@@ -12,7 +12,12 @@
 #include "base/strings/string16.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/media/desktop_media_list_observer.h"
+#include "chrome/browser/media/desktop_streams_registry.h"
+#include "chrome/browser/media/media_capture_devices_dispatcher.h"
 #include "chrome/browser/media/native_desktop_media_list.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capture_options.h"
 #include "third_party/webrtc/modules/desktop_capture/screen_capturer.h"
 #include "third_party/webrtc/modules/desktop_capture/window_capturer.h"
@@ -90,7 +95,7 @@ namespace extensions {
       work_area.width = rect.width();
       work_area.height = rect.height();
 
-      return displayResult.Pass();
+      return displayResult;
     }
 
     void DispatchEvent(
@@ -99,7 +104,7 @@ namespace extensions {
         scoped_ptr<base::ListValue> args) {
       DCHECK_CURRENTLY_ON(BrowserThread::UI);
       ExtensionsBrowserClient::Get()->BroadcastEventToRenderers(
-        histogram_value, event_name, args.Pass());
+                                                                histogram_value, event_name, std::move(args));
     }
 
     // Lazy initialize screen event listeners until first call
@@ -139,7 +144,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnDisplayBoundsChanged::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   // Called when |new_display| has been added.
@@ -149,7 +154,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN,
       nwapi::nw__screen::OnDisplayAdded::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   // Called when |old_display| has been removed.
@@ -159,7 +164,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN,
       nwapi::nw__screen::OnDisplayRemoved::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   NwScreenGetScreensFunction::NwScreenGetScreensFunction() {}
@@ -202,7 +207,7 @@ namespace extensions {
     scoped_ptr<webrtc::ScreenCapturer> screenCapturer(screens ? webrtc::ScreenCapturer::Create(options) : nullptr);
     scoped_ptr<webrtc::WindowCapturer> windowCapturer(windows ? webrtc::WindowCapturer::Create(options) : nullptr);
 
-    media_list_.reset(new NativeDesktopMediaList(screenCapturer.Pass(), windowCapturer.Pass()));
+    media_list_.reset(new NativeDesktopMediaList(std::move(screenCapturer), std::move(windowCapturer)));
 
     media_list_->StartUpdating(this);
   }
@@ -265,7 +270,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnSourceAdded::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   void NwDesktopCaptureMonitor::OnSourceRemoved(int index) {
@@ -273,7 +278,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnSourceRemoved::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   void NwDesktopCaptureMonitor::OnSourceMoved(int old_index, int new_index) {
@@ -285,7 +290,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnSourceOrderChanged::kEventName,
-      args.Pass());    
+      std::move(args));    
   }
 
   void NwDesktopCaptureMonitor::OnSourceNameChanged(int index) {
@@ -296,7 +301,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnSourceNameChanged::kEventName,
-      args.Pass());    
+      std::move(args));    
   }
 
   void NwDesktopCaptureMonitor::OnSourceThumbnailChanged(int index) {
@@ -318,7 +323,7 @@ namespace extensions {
     DispatchEvent(
       events::HistogramValue::UNKNOWN, 
       nwapi::nw__screen::OnSourceThumbnailChanged::kEventName,
-      args.Pass());
+      std::move(args));
   }
 
   NwScreenStartMonitorFunction::NwScreenStartMonitorFunction() {}
@@ -342,6 +347,38 @@ namespace extensions {
 
   bool NwScreenIsMonitorStartedFunction::RunNWSync(base::ListValue* response, std::string* error) {
     response->AppendBoolean(NwDesktopCaptureMonitor::GetInstance()->IsStarted());
+    return true;
+  }
+
+  NwScreenRegisterStreamFunction::NwScreenRegisterStreamFunction() {}
+
+  bool NwScreenRegisterStreamFunction::RunNWSync(base::ListValue* response, std::string* error) {
+    std::string id;
+    EXTENSION_FUNCTION_VALIDATE(args_->GetString(0, &id));
+
+    // following code is modified from `DesktopCaptureChooseDesktopMediaFunctionBase::OnPickerDialogResults`
+    // in chrome/browser/extensions/api/desktop_capture/desktop_capture_base.cc
+
+    content::DesktopMediaID source = content::DesktopMediaID::Parse(id);
+    content::WebContents* web_contents = GetSenderWebContents();
+    if (!source.is_null() && web_contents) {
+      std::string result;
+      DesktopStreamsRegistry* registry =
+        MediaCaptureDevicesDispatcher::GetInstance()->
+        GetDesktopStreamsRegistry();
+      // TODO(miu): Once render_frame_host() is being set, we should register the
+      // exact RenderFrame requesting the stream, not the main RenderFrame.  With
+      // that change, also update
+      // MediaCaptureDevicesDispatcher::ProcessDesktopCaptureAccessRequest().
+      // http://crbug.com/304341
+      content::RenderFrameHost* const main_frame = web_contents->GetMainFrame();
+      result = registry->RegisterStream(main_frame->GetProcess()->GetID(),
+                                        main_frame->GetRoutingID(),
+                                        web_contents->GetURL().GetOrigin(),
+                                        source,
+                                        extension()->name());
+      response->AppendString(result);
+    }
     return true;
   }
 

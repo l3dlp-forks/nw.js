@@ -179,9 +179,9 @@ bool NwCurrentWindowInternalCapturePageInternalFunction::RunAsync() {
   EXTENSION_FUNCTION_VALIDATE(args_);
 
   scoped_ptr<ImageDetails> image_details;
-  if (args_->GetSize() > 1) {
+  if (args_->GetSize() > 0) {
     base::Value* spec = NULL;
-    EXTENSION_FUNCTION_VALIDATE(args_->Get(1, &spec) && spec);
+    EXTENSION_FUNCTION_VALIDATE(args_->Get(0, &spec) && spec);
     image_details = ImageDetails::FromValue(*spec);
   }
 
@@ -280,7 +280,7 @@ void NwCurrentWindowInternalCapturePageInternalFunction::OnCaptureSuccess(const 
 
   std::string base64_result;
   base::StringPiece stream_as_string(
-      reinterpret_cast<const char*>(vector_as_array(&data)), data.size());
+                                     reinterpret_cast<const char*>(data.data()), data.size());
 
   base::Base64Encode(stream_as_string, &base64_result);
   base64_result.insert(
@@ -356,7 +356,7 @@ bool NwCurrentWindowInternalSetMenuFunction::RunAsync() {
 }
   
 #if defined(OS_WIN)
-static HICON createBadgeIcon(const HWND hWnd, const TCHAR *value, const int sizeX, const int sizeY) {
+static base::win::ScopedHICON createBadgeIcon(const HWND hWnd, const TCHAR *value, const int sizeX, const int sizeY) {
   // canvas for the overlay icon
   gfx::Canvas canvas(gfx::Size(sizeX, sizeY), 1, false);
 
@@ -375,7 +375,7 @@ static HICON createBadgeIcon(const HWND hWnd, const TCHAR *value, const int size
   canvas.DrawStringRectWithFlags(value, gfx::FontList(font), SK_ColorWHITE, gfx::Rect(sizeX, fontSize + yMargin + 1), gfx::Canvas::TEXT_ALIGN_CENTER);
 
   // return the canvas as windows native icon handle
-  return IconUtil::CreateHICONFromSkBitmap(canvas.ExtractImageRep().sk_bitmap());
+  return IconUtil::CreateHICONFromSkBitmap(canvas.ExtractImageRep().sk_bitmap()).Pass();
 }
 #endif
 
@@ -402,7 +402,7 @@ bool NwCurrentWindowInternalSetBadgeLabelFunction::RunAsync() {
     return false;
   }
 
-  HICON icon = NULL;
+  base::win::ScopedHICON icon;
   HWND hWnd = getHWND(getAppWindow(this));
   if (hWnd == NULL) {
     error_ = kNoAssociatedAppWindow;
@@ -413,8 +413,7 @@ bool NwCurrentWindowInternalSetBadgeLabelFunction::RunAsync() {
   if (badge.size())
     icon = createBadgeIcon(hWnd, base::UTF8ToUTF16(badge).c_str(), 16 * scale, 16 * scale);
 
-  taskbar->SetOverlayIcon(hWnd, icon, L"Status");
-  DestroyIcon(icon);
+  taskbar->SetOverlayIcon(hWnd, icon.get(), L"Status");
 #elif defined(OS_LINUX)
   views::LinuxUI* linuxUI = views::LinuxUI::instance();
   if (linuxUI == NULL) {
@@ -607,6 +606,10 @@ bool NwCurrentWindowInternalSetTitleInternalFunction::RunNWSync(base::ListValue*
 bool NwCurrentWindowInternalGetWinParamInternalFunction::RunNWSync(base::ListValue* response, std::string* error) {
   AppWindow* app_window = getAppWindow(this);
 
+  if (!app_window) {
+    *error = "cannot get current window; are you in background page/node context?";
+    return false;
+  }
   //from app_window_api.cc
   content::RenderFrameHost* created_frame =
       app_window->web_contents()->GetMainFrame();

@@ -46,7 +46,7 @@ Some objects of Node context are copied to Browser context so that scripts runni
 * `process` -- the [process module](https://nodejs.org/api/globals.html#globals_process) of Node.js; same as `nw.process`
 * `Buffer` -- the [Buffer class](https://nodejs.org/api/globals.html#globals_class_buffer) of Node.js
 
-#### Relative Path Resovling of `require()` in Browser Context
+#### Relative Path Resolving of `require()` in Browser Context
 
 Relative paths in Browser context are resolved according to path of main HTML file (like all browsers do).
 
@@ -67,7 +67,7 @@ Scripts running in the Node context can use [JS builtin objects]() like browse
 #### Create New Node Context
 **All node modules shares a same Node context in separate context mode**. But you have several ways to create new Node contexts:
 
-* Set `new-instance` option to `true` when creating window with [`Window.open()`](../../References/Window.md#windowopenurl-options-callback)
+* Set `new_instance` option to `true` when creating window with [`Window.open()`](../../References/Window.md#windowopenurl-options-callback)
 * Start NW.js with `--mixed-context` CLI option to turn NW.js into [Mixed Context mode](#mixed-context)
 
 #### Access Browser and NW.js API in Node Context

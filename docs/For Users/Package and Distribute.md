@@ -40,7 +40,7 @@ Before packaging, you should prepare all necessary files on hands. Check out fol
 
 You have to redistribute NW.js with your app to get your app running. NW.js provided multiple [build flavors](Advanced/Build Flavors.md) for different requirements and package size. Choose the proper build flavor for your product or [build it from source code](../For Developers/Building NW.js.md).
 
-All files in the downloaded package should be redistributed with your product, except `nwjc` or `nwjc.exe` in SDK flavor.
+All files in the downloaded package should be redistributed with your product, except tools in SDK flavor including `nwjc`, `payload` and `chromedriver`.
 
 ## Package Your App
 
@@ -75,7 +75,7 @@ cat nw app.nw > app && chmod +x app
 
 ### Windows
 
-Icon for `nw.exe` can be replaced with tools like [Resource Hacker](http://www.angusj.com/resourcehacker/), [node-webkit-builder](https://github.com/mllrsohn/node-webkit-builder) and [node-winresourcer](https://github.com/felicienfrancois/node-winresourcer).
+Icon for `nw.exe` can be replaced with tools like [Resource Hacker](http://www.angusj.com/resourcehacker/), [nw-builder](https://github.com/mllrsohn/node-webkit-builder) and [node-winresourcer](https://github.com/felicienfrancois/node-winresourcer).
 
 You can create a installer to deploy all necessary files onto end user's system. You can use [Windows Installer](https://msdn.microsoft.com/en-us/library/cc185688(VS.85).aspx), [NSIS](http://nsis.sourceforge.net/Main_Page) or [Inno Setup](http://www.jrsoftware.org/isinfo.php).
 

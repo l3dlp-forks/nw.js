@@ -2,6 +2,7 @@
 #define NWJS_CONTENT_HOOKS_H
 
 #include "nw_package.h"
+#include "base/memory/scoped_ptr.h"
 #include "third_party/WebKit/public/web/WebNavigationPolicy.h"
 #include "third_party/WebKit/public/platform/WebPageVisibilityState.h"
 
@@ -18,6 +19,7 @@ namespace blink {
 }
 
 namespace content {
+  class RenderWidget;
   class RenderFrame;
   class RenderFrameHost;
   class RenderProcessHost;
@@ -39,6 +41,7 @@ namespace extensions {
 namespace nw {
 int MainPartsPreCreateThreadsHook();
 void MainPartsPostDestroyThreadsHook();
+void MainPartsPreMainMessageLoopRunHook();
 void ContextCreationHook(blink::WebLocalFrame* frame, extensions::ScriptContext* context);
 void LoadNWAppAsExtensionHook(base::DictionaryValue* manifest, std::string* error);
 void DocumentElementHook(blink::WebLocalFrame* frame,
@@ -62,6 +65,7 @@ void DocumentFinishHook(blink::WebFrame* frame,
                        std::string* nw_inject_js_doc_start,
                        std::string* nw_inject_js_doc_end);
  bool GetImage(Package* package, const FilePath& icon_path, gfx::Image* image);
+ scoped_ptr<base::DictionaryValue> MergeManifest();
  bool ExecuteAppCommandHook(int command_id, extensions::AppWindow* app_window);
  bool ProcessSingletonNotificationCallbackHook(const base::CommandLine& command_line,
                                                const base::FilePath& current_directory);
@@ -75,12 +79,20 @@ void DocumentFinishHook(blink::WebFrame* frame,
                       gfx::Image* image);
 #if defined(OS_MACOSX)
  bool ApplicationShouldHandleReopenHook(bool hasVisibleWindows);
+ void OSXOpenURLsHook(const std::vector<GURL>& startup_urls);
 #endif
  void CreateAppWindowHook(extensions::AppWindow*);
  void ReloadExtensionHook(const extensions::Extension*);
  bool IsReloadingApp();
  void KickNextTick();
  void OverrideWebkitPrefsHook(content::RenderViewHost* rvh, content::WebPreferences* web_prefs);
+ bool PinningRenderer();
+ void SetPinningRenderer(bool pin);
+ void ShowDevtools(bool show, content::WebContents* web_contents, content::WebContents* container = nullptr);
+ bool CheckStoragePartitionMatches(int render_process_id, const GURL& url);
+ bool RphGuestFilterURLHook(content::RenderProcessHost* rph, const GURL* url);
+ bool ShouldServiceRequestHook(int child_id, const GURL& url);
+ bool RenderWidgetWasHiddenHook(content::RenderWidget* rw);
 }
 
 #endif

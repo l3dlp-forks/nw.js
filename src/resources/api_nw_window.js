@@ -20,6 +20,9 @@ var nw_internal = require('binding').Binding.create('nw.currentWindowInternal');
 
 var bgPage = GetExtensionViews(-1, 'BACKGROUND')[0];
 
+if (typeof bgPage === 'undefined') //new instance window
+  bgPage = window;
+
 if (bgPage == window) {
   window.__nw_initwindow = function (routingId, self) {
     if (!bgPage.__nw_windows)
@@ -116,10 +119,10 @@ var appWinEventsMap = {
   'minimize':         'onMinimized',
   'maximize':         'onMaximized',
   'restore':          'onRestored',
-  'resize':           'onResized',
-  'move':             'onMoved',
   'enter-fullscreen': 'onFullscreened',
-  'closed':           'onClosed'
+  'closed':           'onClosed',
+  'move':             'onMoved',
+  'resize':           'onResized'
 };
 
 var nwWinEventsMap = {
@@ -215,19 +218,12 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
     };
 
     NWWindow.prototype.on = function (event, callback, record) {
+      var self = this;
       if (typeof record === 'undefined') {
         nwNatives.callInWindow(bgPage, "__nw_record_event", this, event, callback, false);
       }
       if (event === 'close') {
         this.onClose.addListener(callback, {instanceId: currentWidgetRoutingID});
-        return this;
-      }
-      if (appWinEventsMap.hasOwnProperty(event)) {
-        this.appWindow[appWinEventsMap[event]].addListener(callback);
-        return this;
-      }
-      if (nwWinEventsMap.hasOwnProperty(event)) {
-        this[nwWinEventsMap[event]].addListener(callback);
         return this;
       }
       switch (event) {
@@ -252,7 +248,7 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
           policy.forceDownload  =  function () { this.val = 'download'; };
           policy.forceNewWindow =  function () { this.val = 'new-window'; };
           policy.forceNewPopup  =  function () { this.val = 'new-popup'; };
-          policy.setNewWindowManifest = function (m) { this.manifest = JSON.stringify(m); };
+          policy.setNewWindowManifest = function (m) { this.manifest = m; };
           callback(frame, url, policy);
         }
         h.listener = callback;
@@ -266,6 +262,30 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
         j.listener = callback;
         this.onNavigation.addListener(j);
         break;
+      case 'move':
+        function cb() {
+          callback(self.x, self.y);
+        }
+        cb.listener = callback;
+        this.appWindow.onMoved.addListener(cb);
+        return this; //return early
+        break;
+      case 'resize':
+        function cb2() {
+          callback(self.width, self.height);
+        }
+        cb2.listener = callback;
+        this.appWindow.onResized.addListener(cb2);
+        return this; //return early
+        break;
+      }
+      if (appWinEventsMap.hasOwnProperty(event)) {
+        this.appWindow[appWinEventsMap[event]].addListener(callback);
+        return this;
+      }
+      if (nwWinEventsMap.hasOwnProperty(event)) {
+        this[nwWinEventsMap[event]].addListener(callback);
+        return this;
       }
       return this;
     };
@@ -333,7 +353,7 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
       return this;
     };
 
-    NWWindow.prototype.showDevTools = function(frm, headless, callback) {
+    NWWindow.prototype.showDevTools = function(frm, callback) {
       nwNatives.setDevToolsJail(frm);
       currentNWWindowInternal.showDevToolsInternal(callback);
     };
@@ -408,9 +428,6 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
     NWWindow.prototype.setAlwaysOnTop = function (top) {
       this.appWindow.setAlwaysOnTop(top);
     };
-    NWWindow.prototype.isAlwaysOnTop = function () {
-      return this.appWindow.isAlwaysOnTop();
-    };
     NWWindow.prototype.setPosition = function (pos) {
       if (pos == "center") {
         var screenWidth = screen.availWidth;
@@ -420,9 +437,6 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
         this.appWindow.outerBounds.setPosition(Math.round((screenWidth-width)/2),
                                                Math.round((screenHeight-height)/2));
       }
-    };
-    NWWindow.prototype.isFullscreen = function () {
-      return this.appWindow.isFullscreen();
     };
     NWWindow.prototype.setVisibleOnAllWorkspaces = function(all_visible) {
       this.appWindow.setVisibleOnAllWorkspaces(all_visible);
@@ -528,6 +542,16 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
           currentNWWindowInternal.leaveKioskMode();
       }
     });
+    Object.defineProperty(NWWindow.prototype, 'isFullscreen', {
+      get: function() {
+        return this.appWindow.isFullscreen();
+      }
+    });
+    Object.defineProperty(NWWindow.prototype, 'isAlwaysOnTop', {
+      get: function() {
+        return this.appWindow.isAlwaysOnTop();
+      }
+    });
     Object.defineProperty(NWWindow.prototype, 'menu', {
       get: function() {
         var ret = privates(this).menu || {};
@@ -605,6 +629,8 @@ nw_binding.registerCustomHook(function(bindingsAPI) {
         options.alphaEnabled = true;
       if (params.kiosk === true)
         options.kiosk = true;
+      if (params.new_instance === true)
+        options.new_instance = true;
       if (params.position)
         options.position = params.position;
       if (params.title)
@@ -672,10 +698,10 @@ function updateAppWindowZoom(old_level, new_level) {
   dispatchEventIfExists(currentNWWindow, "onZoom", [new_level]);
 }
 
-function onClose() {
+function onClose(user_force) {
   if (!currentNWWindow)
     return;
-  dispatchEvent("nw.Window.onClose", [], {instanceId: currentWidgetRoutingID});
+  dispatchEvent("nw.Window.onClose", [user_force], {instanceId: currentWidgetRoutingID});
 }
 
 exports.binding = nw_binding.generate();

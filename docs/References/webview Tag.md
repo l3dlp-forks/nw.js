@@ -16,3 +16,26 @@ To embed a web page in your app, add the webview tag to your app's embedder page
 ## References
 
 See [Chrome document of `<webview>` tag](https://developer.chrome.com/apps/tags/webview) for detailed API references.
+
+NW.js added the following methods besides upstream APIs:
+
+### webview.showDevTools(show, [container])
+
+* `show` `{boolean}` flag: open or close the devtools window
+* `container` `{webview Element}` _Optional_ the element of the `<webview>` to be used to display devtools. By default, the DevTools is shown with a new window.
+
+### loading local files in webview
+
+Add the following permission to the manifest:
+```json
+  "webview": {
+     "partitions": [
+        {
+          "name": "trusted",
+          "accessible_resources": [ "<all_urls>" ]
+        }
+     ]
+  }
+```
+
+and add 'partition="trusted"' attribute to the webview tag.

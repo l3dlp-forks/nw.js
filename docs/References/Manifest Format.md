@@ -59,11 +59,11 @@ By default NW.js only allows one instance of your app. If you want to allow mult
 
 ### bg-script
 
-* `{String}` background script
+* `{String}` background script. The script is executed in the background page at the start of application.
 
 ### window
 
-* `{Object}` controls how the main window looks, see [Window Subfields](#window-subfields) below.
+* `{Object}` controls how the window looks, see [Window Subfields](#window-subfields) below.
 
 ### webkit
 
@@ -134,7 +134,7 @@ See [Command Line Options](Command Line Options.md) for more information.
 
 ### additional_trust_anchors
 
-* `{String}` Containing a list of PEM-encoded certificates (i.e. `"-----BEGIN CERTIFICATE-----\n...certificate data...\n-----END CERTIFICATE-----\n"`).
+* `{Array}` Containing a list of PEM-encoded certificates (i.e. `"-----BEGIN CERTIFICATE-----\n...certificate data...\n-----END CERTIFICATE-----\n"`).
 
 These certificates are used as additional root certificates for validation, to allow connecting to services using a self-signed certificate or certificates issued by custom CAs.
 
@@ -150,6 +150,20 @@ These certificates are used as additional root certificates for validation, to a
 * `{Boolean}` whether the default `Edit` menu should be disabled on Mac OS X. The default value is `false`. Only effective on Mac OS X.
 
 ## Window Subfields
+
+Most of window subfields are inherited by sub windows opened by `window.open()` or links (`<a target="_blank">`) by default. The exception list of non inherited subfields are as following. They will be set to default value for opened window:
+
+* `fullscreen` -> `false`
+* `kiosk` -> `false`
+* `position` -> `null`
+* `resizable` -> `true`
+* `show` -> `true`
+
+All of the window subfields can be overwritten by using [`new-win-policy` event](Window.md#event-new-win-policy-frame-url-policy).
+
+### id
+
+* `{String}` the `id` used to identify the window. This will be used to remember the size and position of the window and restore that geometry when a window with the same id is later opened. [See also the Chrome App documentation](https://developer.chrome.com/apps/app_window#type-CreateWindowOptions)
 
 ### title
 
